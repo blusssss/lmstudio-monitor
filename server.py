@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """Local LM Studio telemetry. Python standard library only; never stores prompts."""
 import argparse
+import hashlib
 import json
 import math
 import os
 from pathlib import Path
-import re
 import signal
 import sqlite3
 import subprocess
@@ -15,6 +15,7 @@ import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlsplit
+from telemetry import Tasks, TERMINAL
 
 ROOT = Path(__file__).resolve().parent
 STOP = threading.Event()
@@ -34,10 +35,23 @@ class Store:
         self.db.execute('CREATE TABLE IF NOT EXISTS samples (ts REAL PRIMARY KEY, data TEXT NOT NULL)')
         self.db.execute('CREATE TABLE IF NOT EXISTS requests (id INTEGER PRIMARY KEY, ts REAL, model TEXT, data TEXT)')
         self.db.commit()
+        columns = {r[1] for r in self.db.execute('PRAGMA table_info(requests)')}
+        if 'request_key' not in columns:
+            self.db.execute('ALTER TABLE requests ADD COLUMN request_key TEXT')
+        self.db.execute('CREATE UNIQUE INDEX IF NOT EXISTS request_key_index ON requests(request_key)')
+        self.db.execute('CREATE INDEX IF NOT EXISTS requests_time_index ON requests(ts)')
+        self.db.execute('CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT NOT NULL)')
+        self.db.commit()
+        revision = self.db.execute("SELECT value FROM settings WHERE key='history_revision'").fetchone()
+        self.history_revision = float(revision[0]) if revision else 0
         self.last_sample = 0
 
     def sample(self, data):
         with self.lock:
+            if data.get('history_revision',self.history_revision) != self.history_revision:
+                return
+            if data['ts'] < self.history_revision:
+                return
             if data['ts'] - self.last_sample < 5:
                 return
             self.last_sample = data['ts']
@@ -47,14 +61,51 @@ class Store:
             self.db.commit()
 
     def request(self, ts, model, stats):
+        fingerprint = hashlib.sha256(json.dumps([ts,model,stats],sort_keys=True).encode()).hexdigest()
+        key = 'summary:'+fingerprint
         with self.lock:
-            cur = self.db.execute('INSERT INTO requests(ts,model,data) VALUES (?,?,?)', (ts, model, json.dumps(stats)))
+            self.db.execute('INSERT OR IGNORE INTO requests(ts,model,data,request_key) VALUES (?,?,?,?)', (ts,model,json.dumps(stats),key))
             self.db.commit()
-            return cur.lastrowid
+            return self.db.execute('SELECT id FROM requests WHERE request_key=?',(key,)).fetchone()[0]
 
-    def requests(self):
+    def task(self, row):
         with self.lock:
-            return [dict(id=i, ts=t, model=m, **json.loads(d)) for i,t,m,d in self.db.execute('SELECT id,ts,model,data FROM requests ORDER BY id DESC LIMIT 100')]
+            self.db.execute("INSERT INTO requests(ts,model,data,request_key) VALUES (?,?,?,?) ON CONFLICT(request_key) DO UPDATE SET ts=excluded.ts,data=excluded.data", (row['updated_at'],row['model'],json.dumps(row),row['request_key']))
+            self.db.commit()
+
+    def recover(self):
+        with self.lock:
+            rows = list(self.db.execute('SELECT id,data FROM requests WHERE request_key IS NOT NULL'))
+            for ident, data in rows:
+                row = json.loads(data)
+                if row.get('kind') == 'runtime' and row.get('status') not in TERMINAL:
+                    row.update(status='interrupted', ended_at=time.time(), updated_at=time.time(), stopReason='采集器重启，后续状态未知', decode_tps=None)
+                    row.setdefault('stage_events',[]).append({'phase':'interrupted','ts':row['ended_at']})
+                    self.db.execute('UPDATE requests SET data=? WHERE id=?',(json.dumps(row),ident))
+            self.db.commit()
+
+    def clear_history(self, active_keys):
+        with self.lock:
+            before_requests = self.db.execute('SELECT COUNT(*) FROM requests').fetchone()[0]
+            before_samples = self.db.execute('SELECT COUNT(*) FROM samples').fetchone()[0]
+            revision = time.time()
+            with self.db:
+                self.db.execute('DELETE FROM samples')
+                if active_keys:
+                    placeholders = ','.join('?' for _ in active_keys)
+                    self.db.execute(f'DELETE FROM requests WHERE request_key IS NULL OR request_key NOT IN ({placeholders})',tuple(active_keys))
+                else:
+                    self.db.execute('DELETE FROM requests')
+                self.db.execute("INSERT INTO settings VALUES ('history_revision',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",(str(revision),))
+            self.history_revision = revision
+            self.last_sample = 0
+            remaining = self.db.execute('SELECT COUNT(*) FROM requests').fetchone()[0]
+            return dict(requests_deleted=before_requests-remaining,samples_deleted=before_samples,active_preserved=remaining,history_revision=revision)
+
+    def requests(self, kind=None):
+        with self.lock:
+            rows = [{**json.loads(d), 'id':i, 'ts':t, 'model':m} for i,t,m,d in self.db.execute('SELECT id,ts,model,data FROM requests ORDER BY ts DESC LIMIT 1000')]
+            return [r for r in rows if kind is None or r.get('kind','summary')==kind][:200]
 
     def history(self, seconds):
         with self.lock:
@@ -64,21 +115,49 @@ class Monitor:
     def __init__(self, config, store):
         self.config, self.store = config, store
         self.lock = threading.RLock()
-        self.state = {'ts': time.time(), 'models': [], 'gpu': [], 'gpu_processes': [], 'system': {}, 'live': {}, 'requests': store.requests(), 'sources': {}, 'lm_connected': False}
+        self.state = {'ts': time.time(), 'models': [], 'gpu': [], 'gpu_processes': [], 'system': {}, 'live': {}, 'requests': [], 'sources': {}, 'lm_connected': False}
         self.children = set()
         self.children_lock = threading.Lock()
         self.last_cpu = None
-    def source(self, key, ok, detail):
+        store.recover()
+        self.tasks = Tasks(store.task)
+        self.threads = []
+        self.diagnostics = []
+
+    def source(self, key, ok, detail, status=None, event=False):
         with self.lock:
-            self.state['sources'][key] = {'ok': ok, 'detail': detail, 'ts': time.time()}
+            previous = self.state['sources'].get(key,{})
+            self.state['sources'][key] = {'ok':ok, 'status':status or ('ready' if ok else 'disconnected'), 'detail':detail, 'ts':time.time(), 'last_event_at':time.time() if event else previous.get('last_event_at')}
+
+    def diagnostic(self, code):
+        with self.lock:
+            self.diagnostics = ([{'ts':time.time(),'code':code}] + self.diagnostics)[:20]
 
     def snapshot(self):
         with self.lock:
             data = json.loads(json.dumps(self.state))
-        data['ts'] = time.time()
-        for live in data['live'].values():
-            live['stale'] = time.time()-live.get('updated_at',0) > 12
+            data['ts'] = time.time()
+            data['version'] = '2.0.0'
+            data['history_revision'] = self.store.history_revision
+            data['live'] = self.tasks.live(data['lm_connected'],data['sources'].get('runtime',{}),data['ts'])
+            data['requests'] = self.store.requests('runtime')
+            data['summaries'] = self.store.requests('summary')
+            data['diagnostics'] = list(self.diagnostics)
         return data
+
+    def clear_history(self):
+        with self.lock:
+            active = {key:row for key,row in self.tasks.tasks.items() if row['status'] not in TERMINAL}
+            result = self.store.clear_history(list(active))
+            self.tasks.tasks = active
+            self.tasks.slots = {key:value for key,value in self.tasks.slots.items() if value in active}
+            self.diagnostics = []
+            return {**result,'state':self.snapshot()}
+
+    def disconnected(self, reason):
+        with self.lock:
+            self.state['lm_connected'] = False
+            self.tasks.interrupt(reason)
 
     def poll_models(self):
         while not STOP.is_set():
@@ -94,17 +173,11 @@ class Monitor:
                     self.state['models'] = models
                     self.state['lm_connected'] = True
                     loaded = {i['id'] for m in models for i in m.get('loaded_instances',[])}
-                    for model, live in self.state['live'].items():
-                        if model not in loaded:
-                            live['active'] = False
-                            for slot in live.get('slots', {}).values():
-                                slot['active'] = False
+                    for model in {r['model'] for r in self.tasks.tasks.values()} - loaded:
+                        self.tasks.interrupt('模型已卸载',model)
                 self.source('lm_api', True, '原生 API · 每 3 秒')
             except Exception as exc:
-                with self.lock:
-                    self.state['lm_connected'] = False
-                    for live in self.state['live'].values():
-                        live['active'] = False
+                self.disconnected('LM Studio API 连接中断，后续状态未知')
                 detail = '无法连接；请启动 LM Studio API' if isinstance(exc, urllib.error.URLError) else str(exc)
                 if isinstance(exc, urllib.error.HTTPError):
                     detail = 'HTTP '+str(exc.code)+'；检查 API 版本或 LM_API_TOKEN'
@@ -112,49 +185,33 @@ class Monitor:
             STOP.wait(3)
 
     def process_event(self, source, event):
+        if not isinstance(event,dict):
+            raise ValueError('invalid event')
         data = event.get('data', {})
+        if not isinstance(data,dict):
+            return
         model = data.get('modelIdentifier')
         if not model:
             return
         ts = number(event.get('timestamp'))
         ts = ts/1000 if ts else time.time()
         with self.lock:
-            live = self.state['live'].setdefault(model, {})
+            if ts <= self.store.history_revision:
+                return
             if source == 'model' and data.get('type') == 'llm.prediction.output':
-                raw = data.get('stats', {})
+                raw = data.get('stats') or {}
                 stats = {key:raw.get(key) for key in ('stopReason','tokensPerSecond','timeToFirstTokenSec','totalTimeSec','promptTokensCount','predictedTokensCount','totalTokensCount')}
-                row = dict(id=self.store.request(ts, model, stats), ts=ts, model=model, **stats)
-                self.state['requests'] = ([row]+self.state['requests'])[:100]
-                live['last_stats'] = stats
-                live['summary_at'] = ts
-                return
-            if source != 'runtime':
-                return
-            message = data.get('message', '')
-            live.update(pid=data.get('pid'), engine=data.get('engineName'), engine_version=data.get('engineVersion'))
-            key = '0'
-            for line in message.splitlines():
-                slot = re.search(r'id\s+(\d+)\s*\|\s*task\s+(-?\d+)',line)
-                key = slot.group(1) if slot else key
-                slots = live.setdefault('slots',{})
-                state = slots.setdefault(key,{})
-                timing = re.search(r'n_gen\s*=\s*(\d+),\s*tg\s*=\s*([\d.]+)\s*t/s,\s*tg_3s\s*=\s*([\d.]+)',line)
-                if 'processing task' in line or timing:
-                    task = slot.group(2) if slot else None
-                    if task != state.get('task'):
-                        state.clear()
-                    state.update(active=True, task=task, updated_at=ts)
-                if timing:
-                    state.update(generated_tokens=int(timing[1]), decode_tps=float(timing[3]), average_tps=float(timing[2]))
-                prefill = re.search(r'prompt eval time\s*=\s*([\d.]+) ms\s*/\s*(\d+) tokens.*?([\d.]+) tokens per second',line)
-                if prefill:
-                    state.update(prefill_ms=float(prefill[1]), prefill_tokens=int(prefill[2]), prefill_tps=float(prefill[3]))
-                finish = re.search(r'stop processing: n_tokens\s*=\s*(\d+), truncated\s*=\s*(\d+)',line)
-                if finish:
-                    state.update(active=False, context_tokens=int(finish[1]), truncated=bool(int(finish[2])), updated_at=ts)
-                if timing or prefill or finish or 'processing task' in line:
-                    live['updated_at'] = ts
-            live['active'] = any(s.get('active',False) for s in live.get('slots',{}).values())
+                stats['kind'] = 'summary'
+                # No request ID is exposed: never merge a summary into a Runtime task by timing.
+                stats['association'] = 'unlinked'
+                self.store.request(ts,model,stats)
+            elif source == 'runtime':
+                data = dict(data)
+                for item in self.state['models']:
+                    for instance in item.get('loaded_instances',[]):
+                        if instance.get('id') == model:
+                            data['_context_capacity'] = instance.get('config',{}).get('context_length')
+                self.tasks.process(model,data,ts)
 
     def log_worker(self, source):
         # CLI attaches to the local daemon; does not launch it. No raw IO is persisted.
@@ -170,21 +227,27 @@ class Monitor:
                 args = [self.config.lms,'log','stream','--source',source,'--json']
                 if source == 'model':
                     args += ['--stats','--filter','output']
-                process = subprocess.Popen(args,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,bufsize=1)
+                process = subprocess.Popen(args,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,encoding='utf-8',errors='replace',bufsize=1)
                 with self.children_lock:
                     self.children.add(process)
-                self.source(source, True, '日志连接已启动 · 自动重连')
+                self.source(source, True, '已订阅，等待事件',status='subscribed')
                 for line in process.stdout:
                     if STOP.is_set():
                         break
                     try:
                         self.process_event(source,json.loads(line))
-                        self.source(source,True,'日志事件已接收')
+                        self.source(source,True,'事件已接收',status='receiving',event=True)
                     except (json.JSONDecodeError, TypeError, ValueError):
+                        if line.lstrip().startswith('{'):
+                            self.diagnostic(source+'_invalid_event')
                         if 'error' in line.lower():
                             self.source(source,False,'日志流错误；等待重连')
+                            break
                 if not STOP.is_set():
-                    self.source(source,False,'日志流断开；3 秒后重连')
+                    self.source(source,False,'订阅已断开，将自动重连')
+                    if source == 'runtime':
+                        with self.lock:
+                            self.tasks.interrupt('Runtime 日志中断，后续状态未知')
             except (OSError, AttributeError):
                 self.source(source,False,'无法启动 lms；检查 LMS_BIN')
             finally:
@@ -254,16 +317,20 @@ class Monitor:
             except (OSError,ValueError,KeyError):
                 self.source('system',False,'系统采样不可用')
             state=self.snapshot()
-            active=[s for live in state['live'].values() if state['lm_connected'] and not live['stale'] for s in live.get('slots',{}).values() if s.get('active') and time.time()-s.get('updated_at',0)<12]
-            self.store.sample(dict(ts=time.time(),gpu=state['gpu'],system=state['system'],decode_tps=sum(s.get('decode_tps',0) for s in active) if any(s.get('decode_tps') is not None for s in active) else None))
+            active=[s for live in state['live'].values() if state['lm_connected'] for s in live.get('slots',{}).values() if s.get('active') and not s.get('stale')]
+            self.store.sample(dict(ts=time.time(),history_revision=state['history_revision'],gpu=state['gpu'],system=state['system'],instances={model: {'decode_tps': sum(s['decode_tps'] for s in live['slots'].values() if s.get('decode_tps') is not None) if any(s.get('decode_tps') is not None for s in live['slots'].values()) else None} for model,live in state['live'].items()},decode_tps=sum(s.get('decode_tps',0) for s in active) if any(s.get('decode_tps') is not None for s in active) else None))
             STOP.wait(max(.05,1-(time.monotonic()-start)))
 
     def start(self):
         for target,args in [(self.poll_models,()),(self.sampler,()),(self.log_worker,('model',)),(self.log_worker,('runtime',))]:
-            threading.Thread(target=target,args=args,daemon=True).start()
+            thread = threading.Thread(target=target,args=args,daemon=True)
+            self.threads.append(thread)
+            thread.start()
 
     def stop(self):
         STOP.set()
+        with self.lock:
+            self.tasks.interrupt('采集器已停止')
         with self.children_lock:
             for child in self.children:
                 if child.poll() is None:
@@ -281,10 +348,36 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header('X-Content-Type-Options','nosniff')
         self.send_header('Content-Security-Policy',"default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; frame-ancestors 'none'")
         self.end_headers(); self.wfile.write(body)
+    def do_POST(self):
+        if urlsplit(self.path).path != '/api/history/clear':
+            self.send(404,b'Not found','text/plain')
+            return
+        origin = self.headers.get('Origin')
+        if origin and urlsplit(origin).netloc != self.headers.get('Host'):
+            self.send(403,b'Origin rejected','text/plain')
+            return
+        if self.headers.get('Content-Type','').split(';')[0] != 'application/json':
+            self.send(415,b'JSON required','text/plain')
+            return
+        try:
+            size = int(self.headers.get('Content-Length','0'))
+            if not 0 < size <= 1024:
+                raise ValueError()
+            if not isinstance(json.loads(self.rfile.read(size)),dict):
+                raise ValueError()
+        except (ValueError,TypeError):
+            self.send(400,b'Invalid JSON','text/plain')
+            return
+        self.send(200,json.dumps(self.server.monitor.clear_history()).encode(),'application/json; charset=utf-8')
+
     def do_GET(self):
         path=urlsplit(self.path).path
         if path=='/api/state':
             self.send(200,json.dumps(self.server.monitor.snapshot()).encode(),'application/json; charset=utf-8')
+        elif path=='/api/diagnostics':
+            state=self.server.monitor.snapshot()
+            body={k:state[k] for k in ('version','ts','lm_connected','sources','diagnostics')}
+            self.send(200,json.dumps(body).encode(),'application/json; charset=utf-8')
         elif path=='/api/history':
             self.send(200,json.dumps(self.server.monitor.store.history(86400)).encode(),'application/json; charset=utf-8')
         elif path=='/api/events':
@@ -320,7 +413,7 @@ def main():
     config=parser.parse_args();config.lm_url=config.lm_url.rstrip('/');config.token=os.environ.get('LM_API_TOKEN','')
     url=urlsplit(config.lm_url)
     if url.hostname not in ('localhost','127.0.0.1','::1') or url.scheme not in ('http','https'):
-        parser.error('第一版仅支持本机 LM Studio URL，CLI 日志始终来自本机')
+        parser.error('仅支持本机 LM Studio URL，CLI 日志始终来自本机')
     Path(config.db).parent.mkdir(parents=True,exist_ok=True)
     store=Store(config.db);monitor=Monitor(config,store)
     server=ThreadingHTTPServer((config.host,config.port),Handler);server.daemon_threads=True;server.monitor=monitor
@@ -333,7 +426,12 @@ def main():
     try:
         server.serve_forever(poll_interval=.3)
     finally:
-        monitor.stop(); server.server_close()
+        monitor.stop()
+        server.server_close()
+        for thread in monitor.threads:
+            thread.join(timeout=7)
+        if all(not thread.is_alive() for thread in monitor.threads):
+            store.db.close()
 
 if __name__=='__main__':
     main()

@@ -1,78 +1,102 @@
-# LM Studio Monitor · V1
+# LM Studio Monitor · V2
 
-本机 LM Studio 的中文监控页面。仅使用 Python 3.10+ 标准库、原生 HTML/CSS/JS，无需 pip/npm 安装。第一版针对 Linux + NVIDIA + LM Studio 原生 v1 API，已在本机 llama.cpp 2.41.0 验证。
+本机 LM Studio 监控页面，面向 **Linux + NVIDIA GPU**。Python 3.10+ 标准库后端，原生 HTML/CSS/JavaScript 前端，无需安装运行依赖。Windows 适配留给独立分支。
 
 ## 启动
 
 ```bash
+git clone https://github.com/blusssss/lmstudio-monitor.git
 cd lmstudio-monitor
+git switch v2
 python3 server.py
 ```
 
-打开 http://127.0.0.1:8090 。LM Studio 未启动时仍采集 GPU 和系统指标。监控程序不会自动启动 LM Studio、加载模型或发送推理请求。
-
-LM Studio 需要启用本机 API，默认 http://127.0.0.1:1234 。已有 CLI 可使用：
+浏览器打开 **http://127.0.0.1:8090**。监控不会自动启动 LM Studio、加载模型或发送推理请求。启动本机 LM Studio API 并加载模型后，页面自动连接：
 
 ```bash
 ~/.lmstudio/bin/lms daemon up
 ~/.lmstudio/bin/lms server start --bind 127.0.0.1 --port 1234
 ```
 
-模型可在 LM Studio 中加载。监控程序自动连接日志，断开后重试。命令行配置：
+按 Ctrl+C 停止监控，订阅子进程会被关闭；LM Studio 由用户独立管理。
+
+## 页面
+
+- 首页：运行状态、实时解码、最近 TTFT、最近 Prefill 速度、GPU 利用率、显存、最近结束时上下文。TTFT 来自完成统计，Prefill 来自运行时；均显示更新时间。
+- 趋势：按模型实例和 GPU 筛选；解码与资源分图、每图一个单位。可切换时间范围、资源指标和暂停绘图。
+- **运行任务**：按实例引用、PID、slot、任务编号和采集会话区分，记录处理输入、生成、结束、取消、中断和错误。点击时间查看阶段耗时、Token、上下文与同期 GPU 曲线。
+- **完成统计**：模型日志给出的输入/输出 Token、平均解码、TTFT 和总耗时。该来源未暴露稳定请求 ID，故单独显示，不按时间推测对应的并发任务。
+- **模型与采集**：模型配置、KV 可用性、GPU 进程和各采集源状态。
+- 支持统计 JSON 与脱敏诊断导出。页面不依赖外部 CDN，不保存提示词或回答。
+- **清空历史**：一键删除所有实例的已结束任务、完成统计、历史模型选项、趋势与诊断记录，保留当前正在运行的任务和已加载模型。清空后继续采集新数据；其他打开的标签页会同步移除旧历史。
+
+## 指标口径与边界
+
+| 指标 | 来源及口径 |
+|---|---|
+| 实时解码 | Runtime `tg_3s`，约 3 秒更新，所选实例活跃任务合计。超过 12 秒未更新、订阅中断或服务离线时隐藏。 |
+| Prefill | Runtime 实际计算的 Token 数、耗时和速度；通常结束时才出现，缓存复用时不同于完整输入 Token 数。 |
+| Decode 耗时与平均速度 | Runtime `eval time`；运行时总耗时是 Prefill 与 Decode 的实测耗时之和。 |
+| 阶段时间线 | 日志事件的观测时间。第一条速度日志可能晚于实际开始生成；不能代替精确的首 Token 时刻。 |
+| TTFT / API 总耗时 | 完成统计来源；不与 Runtime 任务强行关联。排队与加载耗时无法可靠拆分时显示不可用。 |
+| 上下文容量 | 任务开始附近可读取到的模型加载配置快照；旧记录缺少快照时不与新容量强行比较。 |
+| 结束时上下文 | Runtime slot `n_tokens`，不代表生成中的精确占用。 |
+| 生成中上下文估算 | 仅同时具备实际处理输入和已生成 Token 时显示；缓存复用可能低估总量。没有数据时不做字符数估算。 |
+| KV Cache | 当前仅确认 GPU Offload 配置。实际分配量、有效占用、命中率尚不可用，不以显存差值代替。 |
+| GPU | `nvidia-smi` 约每秒采集，整卡包含其他进程。进程显存不等于 KV 占用。 |
+| CPU / RAM | Linux `/proc`；CPU 首次采样不可用，随后显示差分。 |
+
+Runtime 适配已在本机 llama.cpp 2.41.0 验证。LM Studio 升级后应复核日志格式。订阅“已启动”与“已接收事件”分别标记。中途接入或断线期间的状态无法补回；未知终态记录为中断，不冒充成功完成。
+
+## 配置
 
 ```bash
-python3 server.py --host 127.0.0.1 --port 8090 --lm-url http://127.0.0.1:1234
+python3 server.py --host 127.0.0.1 --port 8090 \
+  --lm-url http://127.0.0.1:1234 \
+  --lms /path/to/lms \
+  --db ./data/monitor.sqlite3
 ```
 
-环境变量 `LM_URL`、`LMS_BIN` 可覆盖本机 API 和 CLI 路径。API 启用认证时，通过环境变量 `LM_API_TOKEN` 提供令牌；不要写入源码。当前 CLI 日志始终读取本机 daemon，因此 API 地址限制为本机。
+环境变量：`LM_URL`、`LMS_BIN`、`LM_API_TOKEN`。API 启用认证时，通过 `LM_API_TOKEN` 提供令牌，不写进源码。CLI 日志来自本机，所以 API 地址限制为本机。
 
-从其他电脑访问，推荐 SSH 转发（替换主机地址）：
+另一台电脑访问可使用 SSH 转发：
 
 ```bash
-ssh -L 8090:127.0.0.1:8090 yangdi@主机地址
+ssh -L 8090:127.0.0.1:8090 用户名@主机地址
 ```
 
-然后在该电脑打开 http://127.0.0.1:8090 。也可显式使用 `--host 0.0.0.0` 在可信局域网提供访问；第一版页面没有登录认证。服务默认为 loopback，不修改防火墙。
+随后在该电脑打开 http://127.0.0.1:8090。也支持显式 `--host 0.0.0.0`，但程序没有登录认证，应只用于可信环境。
 
-## 指标口径
+## 数据与升级
 
-- 实时解码：Runtime `tg_3s`，约 3 秒一次。页面按模型活跃 slot 合计，趋势按所有活跃实例合计；12 秒未更新标为失效并停止展示速度。
-- Prefill：Runtime `prompt eval` 的实际处理速度；请求结束才可获取。缓存复用使实际处理 Token 与 API 输入 Token 不一定相同。
-- TTFT、平均解码、输入/输出 Token、总耗时和结束原因：模型 output 日志。只记录采集器在线期间完成的请求。
-- 上下文：配置容量来自模型 API；占用为最后结束时 Runtime slot `n_tokens`。不等同于生成中的精确实时占用；并发时展示最近结束的 slot。
-- KV：只展示已确认的 GPU Offload 配置；实际字节数、有效占用、命中率显示不可用。
-- GPU：`nvidia-smi` 约每秒采集整卡利用率、显存、温度、功耗、频率及进程显存。其他进程的数据会计入整卡，不能全部归因于模型。
-- CPU / RAM：Linux `/proc`；首次 CPU 采样不可用，第二次起显示差分。
-- 连接状态：日志“连接已启动”表示订阅进程已启动；“事件已接收”表示实际收到事件。页面支持 SSE 自动重连。
+默认数据库为 `data/monitor.sqlite3`，目录自动创建。每 5 秒存储采样，保留 24 小时；任务和完成统计保留 7 天，各展示最近 200 条。过期数据在后续采样时清理。生成、结束和取消等状态变化会更新同一条任务，不重复计数。
 
-## 数据与保留
+V2 自动为 V1 数据库添加任务键和索引；旧请求保留在“完成统计”。采集器异常退出后再次启动，未结束任务标为中断。升级前可自行备份数据库；若需回退，建议使用备份副本。
 
-`data/monitor.sqlite3`（可通过 `--db` 修改）每 5 秒保存一份采样，保留 24 小时；请求统计保留 7 天，页面展示最新 100 条。过期记录在采样时清理。日志不落盘；提示词和模型回答不进入数据库和监控 API。JSON 导出包含当前统计、进程信息及已加载的历史曲线。
+清空历史会删除数据库中的历史记录，无法通过页面恢复；需要保留时请先导出。清空不会卸载模型或取消请求。
 
-页面不依赖外部 CDN。运行时日志字段属于版本相关适配，升级 LM Studio 后应复核；尚未验证所有并发、取消和 GUI 聊天场景。首次接入正在执行的请求时，可能要等待下一条 Runtime 速度事件。
+JSON 导出含模型与进程信息、任务统计及已加载历史，不含对话内容。脱敏诊断仅含版本、连接状态、采集源和错误代码。仓库不包含数据库、模型、凭据或本机测试输出。
 
-## 验证
+## 验证与开发
 
 ```bash
 python3 -m unittest discover -s tests -v
-python3 -m py_compile server.py
-~/.lmstudio/.internal/utils/node --check static/app.js
+python3 -m py_compile server.py telemetry.py observe_long_context.py
 ```
 
-测试包括真实 Runtime 日志回放、slot 结束与新任务隔离、请求持久化和输出排除、采样保留和缺失值处理。
+可选浏览器验收（开发依赖，非运行依赖）：
 
-## Windows 后续开发交接
+```bash
+python3 -m pip install playwright==1.64.0
+python3 -m playwright install chromium
+# 先启动监控服务
+python3 tests/browser_smoke.py
+```
 
-当前提交是经过 Linux + NVIDIA 实机验证的 V1 基线，尚未完成 Windows 适配，不保证在 Windows 直接完整运行。页面、HTTP/SSE 服务、SQLite 和大部分日志解析可以复用。建议下一位开发者按以下顺序处理：
+CI 对 Python 3.10/3.12/3.13 执行回归，并在无 GPU、LM Studio 离线环境执行 Chromium 验收。本机的真实推理测试需单独手动运行：
 
-1. 将 `Monitor.system_read()` 的 Linux `/proc` 访问替换为跨平台实现，例如 psutil。
-2. 为 `lms` / `lms.exe` 和 `nvidia-smi` 添加 Windows 路径发现，并允许环境变量覆盖；当前 `LMS_BIN` 已支持覆盖。
-3. 验证 Windows 进程终止和日志自动重连，必要时处理无控制台启动和子进程输出编码。
-4. 复核 Windows LM Studio 的原生 v1 API 与 Runtime 日志字段；不能将 SSE 分片数当成 Token 数。
-5. 添加 Windows 启动脚本，并在实际浏览器验收布局与交互。当前 GPU 采集只覆盖 NVIDIA。
+- `tests/integration_local.py`：需预先加载 `v2-validation`、配置至少 2 个并发 slot，发送一条 512 Token 请求和一条主动取消的请求。
+- `tests/lifecycle_local.py`：**会关闭并重新启动本机 LM Studio daemon**，仅用于独占测试环境，验证推理中断、模型切换和日志恢复。
+- `observe_long_context.py`：手动三轮长上下文负载，模型标识目前为 `qwen/qwen3-1.7b`，每轮最多输出 1536 Token。
 
-不需要从 Linux 复制模型、数据库或 LM Studio 配置。Windows PC 应自行安装 LM Studio、Python 和对应 GPU 驱动，并加载本机模型。
-
-`observe_long_context.py` 是手动观察用脚本：会连续发送三轮请求，每轮最多输出 1536 Token。只在模型已加载、容量足够且明确需要制造负载时运行；模型标识目前为 `qwen/qwen3-1.7b`。
-
-本仓库不包含运行数据库、模型文件、凭据或本机测试结果。`VALIDATION.md` 是开发时验证记录；记录中的服务状态为当时状态，交接时本机 LM Studio 和监控服务已停止。
+`server.py` 负责采集、存储与 HTTP；`telemetry.py` 负责版本相关的 Runtime 任务解析；`static/` 是页面；`tests/` 包含脱敏样本和测试。具体验证结果见 [VALIDATION.md](VALIDATION.md)。
