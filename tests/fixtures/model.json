@@ -1,0 +1,16 @@
+{
+  "timestamp": 1792375119488,
+  "data": {
+    "type": "llm.prediction.output",
+    "stats": {
+      "stopReason": "eosFound",
+      "tokensPerSecond": 55.633547739502426,
+      "timeToFirstTokenSec": 0.05371,
+      "totalTimeSec": 0.898524,
+      "promptTokensCount": 32,
+      "predictedTokensCount": 48,
+      "totalTokensCount": 80
+    },
+    "modelIdentifier": "monitor-validation"
+  }
+}

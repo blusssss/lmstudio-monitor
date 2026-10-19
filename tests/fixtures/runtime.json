@@ -1,0 +1,86 @@
+[
+  {
+    "timestamp": 1792375174655,
+    "data": {
+      "type": "runtime.log",
+      "level": "debug",
+      "message": "1.25.344.744 I slot get_availabl: id  0 | task -1 | selected slot by LRU, t_last = 633185775",
+      "engineName": "llama.cpp-linux-x86_64-nvidia-cuda-avx2",
+      "engineVersion": "2.41.0",
+      "engineType": "llama.cpp",
+      "modelIdentifier": "monitor-validation",
+      "instanceReference": "49/dfw/2jKRhbUGA8pvkiqxH",
+      "pid": 8713
+    }
+  },
+  {
+    "timestamp": 1792375174705,
+    "data": {
+      "type": "runtime.log",
+      "level": "debug",
+      "message": "1.25.394.617 I slot launch_slot_: id  0 | task 49 | processing task, is_child = 0",
+      "engineName": "llama.cpp-linux-x86_64-nvidia-cuda-avx2",
+      "engineVersion": "2.41.0",
+      "engineType": "llama.cpp",
+      "modelIdentifier": "monitor-validation",
+      "instanceReference": "49/dfw/2jKRhbUGA8pvkiqxH",
+      "pid": 8713
+    }
+  },
+  {
+    "timestamp": 1792375177763,
+    "data": {
+      "type": "runtime.log",
+      "level": "debug",
+      "message": "1.28.452.547 I slot print_timing: id  0 | task 49 | n_gen =    166, tg =  54.91 t/s, tg_3s =  55.25 t/s",
+      "engineName": "llama.cpp-linux-x86_64-nvidia-cuda-avx2",
+      "engineVersion": "2.41.0",
+      "engineType": "llama.cpp",
+      "modelIdentifier": "monitor-validation",
+      "instanceReference": "49/dfw/2jKRhbUGA8pvkiqxH",
+      "pid": 8713
+    }
+  },
+  {
+    "timestamp": 1792375180778,
+    "data": {
+      "type": "runtime.log",
+      "level": "debug",
+      "message": "1.31.467.248 I slot print_timing: id  0 | task 49 | n_gen =    330, tg =  54.66 t/s, tg_3s =  54.40 t/s",
+      "engineName": "llama.cpp-linux-x86_64-nvidia-cuda-avx2",
+      "engineVersion": "2.41.0",
+      "engineType": "llama.cpp",
+      "modelIdentifier": "monitor-validation",
+      "instanceReference": "49/dfw/2jKRhbUGA8pvkiqxH",
+      "pid": 8713
+    }
+  },
+  {
+    "timestamp": 1792375181776,
+    "data": {
+      "type": "runtime.log",
+      "level": "debug",
+      "message": "1.32.465.997 I slot print_timing: id  0 | task 49 | prompt eval time =      53.25 ms /    47 tokens (    1.13 ms per token,   882.61 tokens per second)\n1.32.466.000 I slot print_timing: id  0 | task 49 |        eval time =    7018.10 ms /   384 tokens (   18.32 ms per token,    54.57 tokens per second)\n1.32.466.001 I slot print_timing: id  0 | task 49 |       total time =    7071.35 ms /   431 tokens\n1.32.466.001 I slot print_timing: id  0 | task 49 |    graphs reused =        428\n1.32.466.033 I",
+      "engineName": "llama.cpp-linux-x86_64-nvidia-cuda-avx2",
+      "engineVersion": "2.41.0",
+      "engineType": "llama.cpp",
+      "modelIdentifier": "monitor-validation",
+      "instanceReference": "49/dfw/2jKRhbUGA8pvkiqxH",
+      "pid": 8713
+    }
+  },
+  {
+    "timestamp": 1792375181777,
+    "data": {
+      "type": "runtime.log",
+      "level": "debug",
+      "message": "slot      release: id  0 | task 49 | stop processing: n_tokens = 433, truncated = 0",
+      "engineName": "llama.cpp-linux-x86_64-nvidia-cuda-avx2",
+      "engineVersion": "2.41.0",
+      "engineType": "llama.cpp",
+      "modelIdentifier": "monitor-validation",
+      "instanceReference": "49/dfw/2jKRhbUGA8pvkiqxH",
+      "pid": 8713
+    }
+  }
+]
