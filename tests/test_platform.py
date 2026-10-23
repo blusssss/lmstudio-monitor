@@ -38,7 +38,6 @@ class PlatformTests(unittest.TestCase):
         with patch.object(Path,'home',side_effect=AssertionError('discovery called')):
             self.assertEqual(platform.lms_connection_args(5555),['--port','5555'])
 
-    @unittest.skipUnless(os.name == 'nt','Windows CLI home isolation')
     def test_bionic_cli_home_is_isolated_without_copying_credentials(self):
         with tempfile.TemporaryDirectory() as folder:
             home=Path(folder)
@@ -58,7 +57,7 @@ class PlatformTests(unittest.TestCase):
             self.assertEqual(platform.find_lms(), r'C:\My Tools\lms.exe')
         with tempfile.TemporaryDirectory(prefix='lm studio ') as folder:
             home = Path(folder)
-            binary = home / '.lmstudio' / 'bin' / ('lms.exe' if os.name == 'nt' else 'lms')
+            binary = home / '.lmstudio' / 'bin' / 'lms.exe'
             binary.parent.mkdir(parents=True)
             binary.touch()
             with patch.dict(os.environ, {}, clear=True), patch.object(Path, 'home', return_value=home):
@@ -82,7 +81,18 @@ class PlatformTests(unittest.TestCase):
         finally:
             store.db.close()
 
-    @unittest.skipUnless(os.name == 'nt', 'Windows API integration')
+    def test_monitor_reads_windows_cpu_and_memory(self):
+        store = Store(':memory:')
+        try:
+            monitor = Monitor(types.SimpleNamespace(), store)
+            with patch('server.windows_system',side_effect=[(100,40,16000,4000),(200,60,16000,5000)]):
+                first=monitor.system_read()
+                second=monitor.system_read()
+            self.assertIsNone(first['cpu'])
+            self.assertEqual(second,{'cpu':80,'memory_total':16000,'memory_used':5000})
+        finally:
+            store.db.close()
+
     def test_real_windows_resources(self):
         first = platform.windows_system()
         time.sleep(.05)

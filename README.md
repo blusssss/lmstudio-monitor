@@ -1,12 +1,14 @@
-# LM Studio Monitor · V2
+# LM Studio Monitor · Windows
 
-本机 LM Studio 监控页面，支持 **Windows 10/11、Linux + NVIDIA GPU**。Python 3.10+ 标准库后端，原生 HTML/CSS/JavaScript 前端，无需安装运行依赖。
+面向 **Windows 10/11** 的本机 LM Studio 监控页面，GPU 监控支持 NVIDIA 显卡。Python 3.10+ 标准库后端，原生 HTML/CSS/JavaScript 前端，无需安装运行依赖。
 
 ## Windows 启动
 
 安装 Python 3.10+ 后，双击 `start-windows.cmd`，然后打开 **http://127.0.0.1:8090**。控制台按 Ctrl+C 停止。也可在 PowerShell 中执行：
 
 ```powershell
+git clone https://github.com/blusssss/lmstudio-monitor.git
+cd lmstudio-monitor
 py -3 server.py
 # 自定义 CLI 路径（有空格也支持）
 py -3 server.py --lms "$env:USERPROFILE\.lmstudio\bin\lms.exe"
@@ -30,23 +32,7 @@ Windows 上连接 Bionic 时，仅为 CLI 子进程创建临时 home 指针，�
 
 NVIDIA 显卡需要驱动提供 `nvidia-smi.exe`；自动查找 PATH、Windows System32 和 NVIDIA NVSMI 目录。WDDM 模式下进程显存可能为 N/A，页面保留不可用状态；整卡采集继续工作。AMD/Intel 显卡仍可使用模型日志、CPU 和内存监控，GPU 指标暂不支持。
 
-## 启动
-
-```bash
-git clone https://github.com/blusssss/lmstudio-monitor.git
-cd lmstudio-monitor
-git switch v2
-python3 server.py
-```
-
-浏览器打开 **http://127.0.0.1:8090**。监控不会自动启动 LM Studio、加载模型或发送推理请求。启动本机 LM Studio API 并加载模型后，页面自动连接：
-
-```bash
-~/.lmstudio/bin/lms daemon up
-~/.lmstudio/bin/lms server start --bind 127.0.0.1 --port 1234
-```
-
-按 Ctrl+C 停止监控，订阅子进程会被关闭；LM Studio 由用户独立管理。
+监控不会自动启动 LM Studio、加载模型或发送推理请求。启动本机 LM Studio API 并加载模型后，页面自动连接。按 Ctrl+C 停止监控时，订阅子进程会被关闭；LM Studio 由用户独立管理。
 
 ## 页面
 
@@ -72,24 +58,21 @@ python3 server.py
 | 生成中上下文估算 | 仅同时具备实际处理输入和已生成 Token 时显示；缓存复用可能低估总量。没有数据时不做字符数估算。 |
 | KV Cache | 当前仅确认 GPU Offload 配置。实际分配量、有效占用、命中率尚不可用，不以显存差值代替。 |
 | GPU | `nvidia-smi` 约每秒采集，整卡包含其他进程。进程显存不等于 KV 占用。 |
-| CPU / RAM | Windows `GetSystemTimes` / `GlobalMemoryStatusEx`，Linux `/proc`；CPU 首次采样不可用，随后显示差分。 |
+| CPU / RAM | Windows `GetSystemTimes` / `GlobalMemoryStatusEx`；CPU 首次采样不可用，随后显示差分。 |
 
-Runtime 适配已在本机 llama.cpp 2.41.0 验证。LM Studio 升级后应复核日志格式。订阅“已启动”与“已接收事件”分别标记。中途接入或断线期间的状态无法补回；未知终态记录为中断，不冒充成功完成。
+Runtime 适配已在本机 Windows llama.cpp 2.61.0 验证。LM Studio 升级后应复核日志格式。订阅“已启动”与“已接收事件”分别标记。中途接入或断线期间的状态无法补回；未知终态记录为中断，不冒充成功完成。
 
 ## 配置
 
-```bash
-python3 server.py --host 127.0.0.1 --port 8090 \
-  --lm-url http://127.0.0.1:1234 \
-  --lms /path/to/lms \
-  --db ./data/monitor.sqlite3
+```powershell
+py -3 server.py --host 127.0.0.1 --port 8090 --lm-url http://127.0.0.1:1234 --lms "$env:USERPROFILE\.lmstudio\bin\lms.exe" --db .\data\monitor.sqlite3
 ```
 
 环境变量：`LM_URL`、`LMS_BIN`、`LM_API_TOKEN`。API 启用认证时，通过 `LM_API_TOKEN` 提供令牌，不写进源码。CLI 日志来自本机，所以 API 地址限制为本机。
 
 另一台电脑访问可使用 SSH 转发：
 
-```bash
+```powershell
 ssh -L 8090:127.0.0.1:8090 用户名@主机地址
 ```
 
@@ -107,21 +90,21 @@ JSON 导出含模型与进程信息、任务统计及已加载历史，不含对
 
 ## 验证与开发
 
-```bash
-python3 -m unittest discover -s tests -v
-python3 -m py_compile server.py telemetry.py platform_support.py launch_windows.py observe_long_context.py
+```powershell
+py -3 -m unittest discover -s tests -v
+py -3 -m py_compile server.py telemetry.py platform_support.py launch_windows.py observe_long_context.py
 ```
 
 可选浏览器验收（开发依赖，非运行依赖）：
 
-```bash
-python3 -m pip install playwright==1.64.0
-python3 -m playwright install chromium
+```powershell
+py -3 -m pip install playwright==1.64.0
+py -3 -m playwright install chromium
 # 先启动监控服务
-python3 tests/browser_smoke.py
+py -3 tests/browser_smoke.py
 ```
 
-CI 配置对 Windows/Linux 的 Python 3.10/3.12/3.13 执行回归，并在 Linux 的无 GPU、LM Studio 离线环境执行 Chromium 验收。本机的真实推理测试需单独手动运行：
+CI 在 Windows 上对 Python 3.10/3.12/3.13 执行回归，并在无 GPU、LM Studio 离线环境执行 Chromium 验收。本机的真实推理测试需单独手动运行：
 
 - `tests/integration_local.py`：需预先加载 `v2-validation`、配置至少 2 个并发 slot，发送一条 512 Token 请求和一条主动取消的请求。
 - `tests/lifecycle_local.py`：**会关闭并重新启动本机 LM Studio daemon**，仅用于独占测试环境，验证推理中断、模型切换和日志恢复。

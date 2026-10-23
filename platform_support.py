@@ -1,4 +1,4 @@
-"""Small standard-library adapters for Windows and Linux hosts."""
+"""Windows host telemetry and local LM Studio CLI integration."""
 import ctypes
 from contextlib import contextmanager
 import json
@@ -44,7 +44,7 @@ def lms_environment(connection_args):
         selected = connection_args == ['--port', str(info['port'])]
     except (OSError, ValueError, TypeError, KeyError):
         selected = False
-    if os.name == 'nt' and selected:
+    if selected:
         with tempfile.TemporaryDirectory(prefix='lmstudio-cli-') as folder:
             (Path(folder) / '.lmstudio-home-pointer').write_text(str(bionic),encoding='utf-8')
             env['USERPROFILE'] = folder
@@ -57,7 +57,7 @@ def find_lms():
     override = os.environ.get('LMS_BIN')
     if override:
         return override
-    name = 'lms.exe' if os.name == 'nt' else 'lms'
+    name = 'lms.exe'
     installed = Path.home() / '.lmstudio' / 'bin' / name
     return str(installed) if installed.is_file() else (shutil.which(name) or name)
 
@@ -66,18 +66,17 @@ def find_nvidia_smi():
     found = shutil.which('nvidia-smi')
     if found:
         return found
-    if os.name == 'nt':
-        candidates = [Path(os.environ.get('SystemRoot', r'C:\Windows')) / 'System32' / 'nvidia-smi.exe',
-                      Path(os.environ.get('ProgramW6432', r'C:\Program Files')) / 'NVIDIA Corporation' / 'NVSMI' / 'nvidia-smi.exe']
-        for candidate in candidates:
-            if candidate.is_file():
-                return str(candidate)
-    return 'nvidia-smi'
+    candidates = [Path(os.environ.get('SystemRoot', r'C:\Windows')) / 'System32' / 'nvidia-smi.exe',
+                  Path(os.environ.get('ProgramW6432', r'C:\Program Files')) / 'NVIDIA Corporation' / 'NVSMI' / 'nvidia-smi.exe']
+    for candidate in candidates:
+        if candidate.is_file():
+            return str(candidate)
+    return 'nvidia-smi.exe'
 
 
 def child_options():
     # Keep the monitor console visible, hide only periodic CLI helper windows.
-    return {'creationflags': subprocess.CREATE_NO_WINDOW} if os.name == 'nt' else {}
+    return {'creationflags': subprocess.CREATE_NO_WINDOW}
 
 
 class MemoryStatus(ctypes.Structure):

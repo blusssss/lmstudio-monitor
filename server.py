@@ -1,5 +1,4 @@
-#!/usr/bin/env python3
-"""Local LM Studio telemetry. Python standard library only; never stores prompts."""
+"""Local LM Studio telemetry for Windows. Standard library only; never stores prompts."""
 import argparse
 from contextlib import ExitStack
 import hashlib
@@ -298,16 +297,8 @@ class Monitor:
         return devices, processes
 
     def system_read(self):
-        if os.name == 'nt':
-            total,idle,mem_total,mem_used=windows_system()
-            return self.system_values(total,idle,mem_total,mem_used)
-        info={}
-        for line in Path('/proc/meminfo').read_text().splitlines():
-            k,v=line.split(':',1); info[k]=int(v.strip().split()[0])
-        mem_total=info['MemTotal']/1024
-        ticks=list(map(int,Path('/proc/stat').read_text().splitlines()[0].split()[1:]))
-        total=sum(ticks[:8]); idle=ticks[3]+ticks[4]
-        return self.system_values(total,idle,mem_total,mem_total-info['MemAvailable']/1024)
+        total,idle,mem_total,mem_used=windows_system()
+        return self.system_values(total,idle,mem_total,mem_used)
 
     def system_values(self,total,idle,mem_total,mem_used):
         cpu=None
@@ -332,7 +323,7 @@ class Monitor:
                 system=self.system_read()
                 with self.lock:
                     self.state['system']=system
-                self.source('system',True,('Windows API' if os.name == 'nt' else 'Linux /proc')+' · 每秒')
+                self.source('system',True,'Windows API · 每秒')
             except (OSError,ValueError,KeyError):
                 self.source('system',False,'系统采样不可用')
             state=self.snapshot()
@@ -431,6 +422,8 @@ def main():
     parser.add_argument('--lms-port',type=int,help='本机 CLI/SDK 端口（不是 REST API 端口）；默认自动发现')
     parser.add_argument('--db',default=str(ROOT/'data'/'monitor.sqlite3'))
     config=parser.parse_args();config.lm_url=config.lm_url.rstrip('/');config.token=os.environ.get('LM_API_TOKEN','')
+    if os.name != 'nt':
+        parser.error('This version supports Windows 10/11 only.')
     if config.lms_port is not None and not 0 < config.lms_port < 65536:
         parser.error('--lms-port 必须在 1 到 65535 之间')
     url=urlsplit(config.lm_url)

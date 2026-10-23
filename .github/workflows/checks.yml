@@ -4,10 +4,9 @@ permissions:
   contents: read
 jobs:
   python:
-    runs-on: ${{ matrix.os }}
+    runs-on: windows-latest
     strategy:
       matrix:
-        os: [ubuntu-latest, windows-latest]
         python: ['3.10', '3.12', '3.13']
     steps:
       - uses: actions/checkout@v4
@@ -17,19 +16,35 @@ jobs:
       - run: python -m unittest discover -s tests -v
       - run: python -m py_compile server.py telemetry.py platform_support.py launch_windows.py observe_long_context.py
   browser:
-    runs-on: ubuntu-latest
+    runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
       - run: pip install playwright==1.64.0
-      - run: python -m playwright install --with-deps chromium
+      - run: python -m playwright install chromium
       - run: |
-          python server.py --port 8090 --db /tmp/monitor-ci.sqlite3 > /tmp/monitor-ci.log 2>&1 &
-          echo $! > /tmp/monitor-ci.pid
-          python -c "import time,urllib.request; time.sleep(2); assert urllib.request.urlopen('http://127.0.0.1:8090/api/state').status == 200"
-          python tests/browser_smoke.py
+          $database = Join-Path $env:RUNNER_TEMP 'monitor-ci.sqlite3'
+          $stdout = Join-Path $env:RUNNER_TEMP 'monitor-ci.stdout.log'
+          $stderr = Join-Path $env:RUNNER_TEMP 'monitor-ci.stderr.log'
+          $monitor = Start-Process -FilePath (Get-Command python).Source -ArgumentList @('server.py', '--port', '8090', '--db', "`"$database`"") -WindowStyle Hidden -RedirectStandardOutput $stdout -RedirectStandardError $stderr -PassThru
+          $monitor.Id | Set-Content (Join-Path $env:RUNNER_TEMP 'monitor-ci.pid')
+          $ready = $false
+          for ($attempt = 0; $attempt -lt 30; $attempt++) {
+            if ($monitor.HasExited) { throw 'Monitor exited before becoming ready' }
+            try {
+              $response = Invoke-WebRequest 'http://127.0.0.1:8090/api/state' -TimeoutSec 2
+              if ($response.StatusCode -eq 200) { $ready = $true; break }
+            } catch { }
+            Start-Sleep -Milliseconds 500
+          }
+          if (-not $ready) { throw 'Monitor did not become ready' }
+          python tests/browser_smoke.py --clear-history
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - if: always()
         run: |
-          if [ -f /tmp/monitor-ci.pid ]; then kill "$(cat /tmp/monitor-ci.pid)" || true; fi
+          $pidFile = Join-Path $env:RUNNER_TEMP 'monitor-ci.pid'
+          if (Test-Path $pidFile) {
+            Stop-Process -Id ([int](Get-Content $pidFile)) -ErrorAction SilentlyContinue
+          }

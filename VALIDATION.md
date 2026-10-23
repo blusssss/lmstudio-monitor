@@ -1,29 +1,32 @@
-# V2 验证记录 · 2026-10-19
+# Windows 验证记录
 
-## 环境
+功能验证日期：2026-10-20。2026-10-23 整理为 Windows 专用版，保留以下 Windows 验证结果和边界。
 
-Linux，Python 3.12.3，NVIDIA GTX 1060 6GB，驱动 535.309.01，Qwen3 1.7B Q6_K，llama.cpp CUDA runtime 2.41.0。真实推理使用 8192 上下文、双并发，以及切换后的 4096 上下文、单并发。
+## 已验证
 
-## 已通过
+- 2026-10-23 本机 Windows 上 34 项 unittest 全部通过，含原有 23 项及 11 项平台测试。
+- Windows GetSystemTimes / GlobalMemoryStatusEx 实测成功：CPU 差分、约 32 GB 物理内存。
+- NVIDIA GeForce RTX 5070 Ti 的 nvidia-smi 整卡和进程查询成功。
+- WDDM 进程显存 N/A 使用样本回归验证，保持未知值，不伪造为零。
+- 通过 start-windows.cmd 启动，验证首页、JS/CSS、状态、历史、诊断接口以及 SSE。
+- CTRL_BREAK_EVENT 正常退出，启动器退出码 0，无异常堆栈。
+- Python 语法编译和 git diff --check 通过。
+- 本机 lms log stream --help 确认支持项目使用的日志订阅参数。
 
-- 23 项自动化测试：真实 Runtime 样本解析、任务/进程/实例隔离、取消与迟到事件、slot 复用、跨事件耗时、过期速度、V1 数据迁移、重启恢复、统计去重、输出排除、历史保留及容量快照、清空历史、活跃任务保留、清理版本持久化和跨来源请求限制。
-- Python 与 JavaScript 语法检查。
-- 双请求真实并发：一条正常生成 512 Token，另一条主动断开。分别识别为 completed 与 cancelled，任务编号和 slot 独立；结束后实时速度清空。
-- 最新并发样本：正常请求输入 1411 Token、输出 512 Token，平均解码 48.07 tok/s，TTFT 1.281s，运行时 Prefill + Decode 耗时 11.91022s。样本用于链路验证，不是性能基准。
-- 推理过程中关闭 daemon：运行时明确给出取消事件，任务保留 cancelled 状态；API 离线、实时速度隐藏、GPU 继续采集。未知终态的 interrupted 分支由自动化测试覆盖。
-- 重启 daemon 并切换到 v2-switched：新 PID、模型实例和日志重新关联，64 Token 请求正确完成，耗时可读取。
-- 最终构建另行生成 256 Token：任务容量快照为 4096，输出数与阶段总耗时正确。
-- 真实 Chromium 桌面 1440px、窄屏 390px/768px：无页面横向溢出；趋势范围/指标、暂停、任务/统计切换、详情抽屉、Escape 关闭、诊断和数据导出均通过；零页面 JavaScript 异常。
-- 相同浏览器检查在 LM Studio 离线、nvidia-smi 不可用、空数据库的隔离实例通过；缺失指标显示为不可用而非零。
-- 首页 TTFT、Prefill 可见，清空历史在独立样本库中验收，既有开发数据库未删除；另一标签页的历史实例、TTFT 和 Prefill 也同步清空。
-- 桌面与窄屏截图经过人工查看。浏览器及所缺依赖仅用于验收，不进入程序运行依赖。
+## 验证边界
 
-## 保留边界
+- 初次验证时 LM Studio API 未启动；后续在用户已加载的 Bionic 模型 `qwen3.8-27b-gsq-rco-mtp` 上完成真实短请求验收，采集到 Runtime 完成任务、Prefill、Decode、Token、上下文及独立完成统计和 TTFT。32 Token 请求实测平均解码约 7.48 tok/s，TTFT 约 558 ms。
+- 已修复旧 CLI 的 Bionic 服务发现和凭据目录兼容：使用发布的 SDK 端口，并仅为 CLI 子进程提供隔离 home 指针，使其正常读取应用自己的凭据；不复制凭据或修改全局用户配置。
+- 取消和模型切换未在真实 Windows 模型上执行，本次不卸载或重启用户的模型服务。
+- 最初短请求验证期间未观察到 `tg_3s`；后续真实 agent 运行中已收到实时速度日志，历史采样约 33–85 tok/s。无有效日志或速度过期时仍显示不可用，不通过估算伪造实时速度。
+- 已修复趋势图在有效采样多于三个时漏画孤立点的问题，断开区间仍保留，不补零。
+- 真实 Windows 多并发尚未验收；现有并发任务隔离由日志样本回归覆盖。
+- 本机未安装 Playwright，此次未执行 Chromium 浏览器验收。
+- CI 仅配置 Windows 的 Python 3.10/3.12/3.13 回归与 Chromium 验收，远端执行结果以 GitHub Actions 为准。
+- 本次本地启动验证使用 Codex 提供的 Python；项目运行时仍仅依赖 Python 3.10+ 标准库。
 
-- 时间线展示日志观测时刻，不能代替精确的首 Token 边界；Runtime 与完成统计缺少稳定关联 ID，因此分开展示。
-- KV 实际分配量、有效占用、命中率未获得可靠字段；当前只展示已确认的 Offload 配置。
-- 生成中上下文估算需要足够的运行时计数，常见情况下仍不可用；结束时 slot 数不等同于实时占用。
-- 本轮不包含 Windows、AMD/Intel GPU、多机、远程控制、所有 LM Studio 版本或内置 GUI 聊天场景验收。
-- GitHub CI 配置已加入，远端执行结果以 Actions 页面为准；本机没有其他 Python 版本，3.10/3.13 由 CI 验证。
+## 使用
 
-本机测试不下载新模型、不保存提示词/回答、不上传数据库或测试输出。交付时关闭本轮临时启动的 LM Studio 与监控测试进程。
+安装 Python 3.10+ 后，双击项目内的 `start-windows.cmd`。自定义 Python 路径可通过 `MONITOR_PYTHON` 指定。
+访问 http://127.0.0.1:8090，在 LM Studio Developer 页面启动本地 API 后会自动连接。
+详细配置见 README.md。

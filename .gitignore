@@ -7,5 +7,4 @@ data/
 !.env.example
 .venv/
 venv/
-.DS_Store
 Thumbs.db
