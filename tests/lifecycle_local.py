@@ -2,13 +2,17 @@
 import json
 from pathlib import Path
 import subprocess
+import sys
 import threading
 import time
 import urllib.request
 
-LMS=str(Path.home()/'.lmstudio/bin/lms')
+sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
+from platform_support import find_lms, child_options
+
+LMS=find_lms()
 def command(*args):
-    result=subprocess.run([LMS,*args],capture_output=True,text=True,timeout=40)
+    result=subprocess.run([LMS,*args],capture_output=True,text=True,encoding='utf-8',errors='replace',timeout=40,**child_options())
     if result.returncode:raise RuntimeError('lms command failed: '+str(args[:2]))
 def state():return json.load(urllib.request.urlopen('http://127.0.0.1:8090/api/state',timeout=4))
 def wait_until(check,timeout=15):

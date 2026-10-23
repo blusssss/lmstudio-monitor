@@ -127,7 +127,8 @@ class TelemetryTests(unittest.TestCase):
         self.assertEqual(state['summaries'],[]);self.assertEqual(self.store.history(86400),[])
         self.assertEqual(set(state['live']),{'active-model'})
         self.assertEqual(state['requests'][0]['status'],'prefill')
-        self.feed('id 0 | task 88 | stop processing: n_tokens = 100, truncated = 0',model='active-model')
+        # Windows wall-clock readings can be equal across these immediate calls.
+        self.feed('id 0 | task 88 | stop processing: n_tokens = 100, truncated = 0',model='active-model',task_time=result['history_revision']+.001)
         self.assertEqual(self.store.requests('runtime')[0]['status'],'completed')
     def test_clear_revision_survives_restart_and_blocks_stale_history(self):
         old=self.event('id 0 | task 1 | processing task')

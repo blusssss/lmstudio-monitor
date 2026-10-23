@@ -60,7 +60,7 @@ function render(data) {
   modelId = selectOptions($("model-select"), options, modelId || loaded[0]?.instance.id || "*");
   localStorage.setItem("model", modelId);
   gpuId = selectOptions($("gpu-select"), data.gpu.length ? data.gpu.map((g) => [g.uuid, `GPU ${g.index} · ${g.name}`]) : [["", "暂无 GPU"]], gpuId);
-  const notice = !data.lm_connected ? "LM Studio API 未连接。启动本机服务后将自动接入；GPU 与系统资源继续采集。" : !runtime.ok ? "Runtime 日志尚未连接，实时速度与任务状态暂不可用。" : " ";
+  const notice = !data.lm_connected ? "LM Studio API 未连接。启动本机服务后将自动接入；GPU 与系统资源继续采集。" : !runtime.ok ? "Runtime 日志尚未连接，实时速度与任务状态暂不可用。" : !runtime.last_event_at ? "日志已订阅，等待新的推理任务；接入前的请求不会补采。" : " ";
   $("notice").hidden = notice === " ";
   text("notice", notice);
   const active = slots().filter((s) => s.active), speeds = active.filter((s) => s.decode_tps != null);
@@ -69,7 +69,7 @@ function render(data) {
   text("stage", phase ? phaseNames[phase] : !data.lm_connected ? "未连接" : loaded.some((x) => modelId === "*" || x.instance.id === modelId) ? "空闲" : "未加载");
   $("stage").className = `state ${active.length ? "running" : ""}`;
   const rows = selectedRows(data.requests), summaries = selectedRows(data.summaries), recent = rows.find((r) => r.tokensPerSecond != null) || summaries[0];
-  text("decode-note", active.length ? speeds.length ? `${active.length} 个活跃任务 · 约 3 秒更新` : active.some((s) => s.stale && s.status === "decode") ? "速度数据已过期，等待更新" : "等待首条解码速度" : recent ? `最近平均 ${fmt(recent.tokensPerSecond)} tok/s` : "等待生成");
+  text("decode-note", active.length ? speeds.length ? `${active.length} 个活跃任务 · 约 3 秒更新` : active.some((s) => s.stale && s.status === "decode") ? "速度数据已过期，等待更新" : "运行时尚未提供实时速度，结束后显示平均值" : recent ? `最近平均 ${fmt(recent.tokensPerSecond)} tok/s` : "等待生成");
   const latestTtft = summaries.find((r) => r.timeToFirstTokenSec != null);
   const latestPrefill = rows.filter((r) => r.prefill_tps != null).sort((a, b) => b.updated_at - a.updated_at)[0];
   text("ttft", fmt(latestTtft == null ? null : latestTtft.timeToFirstTokenSec * 1e3, 1));
@@ -168,20 +168,31 @@ function plot(canvas, rows, getter, color, unit, start, end, ceiling) {
   c.lineWidth = 1.8;
   c.beginPath();
   let previous = null;
+  let segmentLength = 0;
+  const isolated = [];
+  function endSegment() {
+    if (segmentLength === 1) isolated.push(previous);
+    previous = null;
+    segmentLength = 0;
+  }
   for (const p of points) {
-    if (p.value == null) {
-      previous = null;
+    if (p.value == null || !Number.isFinite(p.value)) {
+      endSegment();
       continue;
     }
+    if (previous && p.ts - previous.ts > 15) endSegment();
     const x = left + (p.ts - start) / (end - start) * width, y = top + height * (1 - p.value / maximum);
-    if (!previous || p.ts - previous.ts > 15) c.moveTo(x, y);
+    if (!previous) c.moveTo(x, y);
     else c.lineTo(x, y);
     previous = p;
+    segmentLength++;
   }
+  endSegment();
   c.stroke();
-  if (numbers.length <= 3) {
+  const markers = numbers.length <= 3 ? numbers : isolated;
+  if (markers.length) {
     c.fillStyle = color;
-    for (const p of numbers) {
+    for (const p of markers) {
       c.beginPath();
       c.arc(left + (p.ts - start) / (end - start) * width, top + height * (1 - p.value / maximum), 2, 0, Math.PI * 2);
       c.fill();

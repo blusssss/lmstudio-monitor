@@ -1,6 +1,34 @@
 # LM Studio Monitor · V2
 
-本机 LM Studio 监控页面，面向 **Linux + NVIDIA GPU**。Python 3.10+ 标准库后端，原生 HTML/CSS/JavaScript 前端，无需安装运行依赖。Windows 适配留给独立分支。
+本机 LM Studio 监控页面，支持 **Windows 10/11、Linux + NVIDIA GPU**。Python 3.10+ 标准库后端，原生 HTML/CSS/JavaScript 前端，无需安装运行依赖。
+
+## Windows 启动
+
+安装 Python 3.10+ 后，双击 `start-windows.cmd`，然后打开 **http://127.0.0.1:8090**。控制台按 Ctrl+C 停止。也可在 PowerShell 中执行：
+
+```powershell
+py -3 server.py
+# 自定义 CLI 路径（有空格也支持）
+py -3 server.py --lms "$env:USERPROFILE\.lmstudio\bin\lms.exe"
+# 自定义端口
+.\start-windows.cmd --port 8091
+```
+
+启动脚本优先使用 `MONITOR_PYTHON` 指定的 Python 路径，其次查找 `py -3` 和 `python`。本机未把 Python 加入 PATH 时，可设置 `$env:MONITOR_PYTHON = 'C:\路径\python.exe'`。
+
+在 LM Studio 的 Developer 页面启动本地 API 服务并加载模型，或自行运行以下命令：
+
+```powershell
+& "$env:USERPROFILE\.lmstudio\bin\lms.exe" server start --bind 127.0.0.1 --port 1234
+```
+
+程序优先使用 `--lms` / `LMS_BIN`，否则查找用户目录 `.lmstudio\bin\lms.exe` 和 PATH。CPU/内存使用 Windows 原生 API，不需要 psutil、WMIC 或管理员权限。后台采样命令不弹出控制台窗口。
+
+支持 Bionic 的独立日志服务：自动读取 `.lmstudio/.internal/http-server.json` 或 `.lmstudio/apps/bionic/.internal/http-server.json` 中的 SDK 端口。该端口不同于 `--lm-url` 的 HTTP 推理端口。旧 CLI 卡在 “Waking up LM Studio service” 时，自动发现会绕过旧版 CLI 的服务查找；也可用 `--lms-port 端口` 显式指定。订阅进程启动后先显示连接中，收到 CLI 的订阅确认才显示已订阅。
+
+Windows 上连接 Bionic 时，仅为 CLI 子进程创建临时 home 指针，使其使用 Bionic 自身的配置与凭据。不会更改用户全局配置或复制凭据。不要额外传 `--host` 给 CLI：它会把本机连接视为远程客户端，影响日志订阅权限。
+
+NVIDIA 显卡需要驱动提供 `nvidia-smi.exe`；自动查找 PATH、Windows System32 和 NVIDIA NVSMI 目录。WDDM 模式下进程显存可能为 N/A，页面保留不可用状态；整卡采集继续工作。AMD/Intel 显卡仍可使用模型日志、CPU 和内存监控，GPU 指标暂不支持。
 
 ## 启动
 
@@ -44,7 +72,7 @@ python3 server.py
 | 生成中上下文估算 | 仅同时具备实际处理输入和已生成 Token 时显示；缓存复用可能低估总量。没有数据时不做字符数估算。 |
 | KV Cache | 当前仅确认 GPU Offload 配置。实际分配量、有效占用、命中率尚不可用，不以显存差值代替。 |
 | GPU | `nvidia-smi` 约每秒采集，整卡包含其他进程。进程显存不等于 KV 占用。 |
-| CPU / RAM | Linux `/proc`；CPU 首次采样不可用，随后显示差分。 |
+| CPU / RAM | Windows `GetSystemTimes` / `GlobalMemoryStatusEx`，Linux `/proc`；CPU 首次采样不可用，随后显示差分。 |
 
 Runtime 适配已在本机 llama.cpp 2.41.0 验证。LM Studio 升级后应复核日志格式。订阅“已启动”与“已接收事件”分别标记。中途接入或断线期间的状态无法补回；未知终态记录为中断，不冒充成功完成。
 
@@ -81,7 +109,7 @@ JSON 导出含模型与进程信息、任务统计及已加载历史，不含对
 
 ```bash
 python3 -m unittest discover -s tests -v
-python3 -m py_compile server.py telemetry.py observe_long_context.py
+python3 -m py_compile server.py telemetry.py platform_support.py launch_windows.py observe_long_context.py
 ```
 
 可选浏览器验收（开发依赖，非运行依赖）：
@@ -93,7 +121,7 @@ python3 -m playwright install chromium
 python3 tests/browser_smoke.py
 ```
 
-CI 对 Python 3.10/3.12/3.13 执行回归，并在无 GPU、LM Studio 离线环境执行 Chromium 验收。本机的真实推理测试需单独手动运行：
+CI 配置对 Windows/Linux 的 Python 3.10/3.12/3.13 执行回归，并在 Linux 的无 GPU、LM Studio 离线环境执行 Chromium 验收。本机的真实推理测试需单独手动运行：
 
 - `tests/integration_local.py`：需预先加载 `v2-validation`、配置至少 2 个并发 slot，发送一条 512 Token 请求和一条主动取消的请求。
 - `tests/lifecycle_local.py`：**会关闭并重新启动本机 LM Studio daemon**，仅用于独占测试环境，验证推理中断、模型切换和日志恢复。

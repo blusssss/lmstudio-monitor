@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Local LM Studio telemetry. Python standard library only; never stores prompts."""
 import argparse
+from contextlib import ExitStack
 import hashlib
 import json
 import math
@@ -16,6 +17,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlsplit
 from telemetry import Tasks, TERMINAL
+from platform_support import find_lms, find_nvidia_smi, child_options, windows_system, lms_connection_args, lms_environment
 
 ROOT = Path(__file__).resolve().parent
 STOP = threading.Event()
@@ -223,17 +225,26 @@ class Monitor:
                 STOP.wait(3)
                 continue
             process = None
+            context = ExitStack()
             try:
                 args = [self.config.lms,'log','stream','--source',source,'--json']
+                connection_args = lms_connection_args(getattr(self.config,'lms_port',None))
+                args += connection_args
                 if source == 'model':
                     args += ['--stats','--filter','output']
-                process = subprocess.Popen(args,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,encoding='utf-8',errors='replace',bufsize=1)
+                process = subprocess.Popen(args,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,encoding='utf-8',errors='replace',bufsize=1,env=context.enter_context(lms_environment(connection_args)),**child_options())
                 with self.children_lock:
                     self.children.add(process)
-                self.source(source, True, '已订阅，等待事件',status='subscribed')
+                self.source(source, False, '正在连接日志服务',status='connecting')
                 for line in process.stdout:
                     if STOP.is_set():
                         break
+                    if 'Streaming logs from LM Studio' in line:
+                        self.source(source,True,'已订阅，等待事件',status='subscribed')
+                        continue
+                    if 'Waking up LM Studio service' in line:
+                        self.source(source,False,'CLI 未找到日志服务；检查 SDK 端口或 --lms-port',status='connecting')
+                        continue
                     try:
                         self.process_event(source,json.loads(line))
                         self.source(source,True,'事件已接收',status='receiving',event=True)
@@ -262,11 +273,13 @@ class Monitor:
                         process.stdout.close()
                     with self.children_lock:
                         self.children.discard(process)
+                context.close()
             STOP.wait(3)
 
     def gpu_read(self):
         fields='index,uuid,name,utilization.gpu,utilization.memory,memory.used,memory.total,temperature.gpu,power.draw,clocks.sm,clocks.mem'
-        result=subprocess.run(['nvidia-smi','--query-gpu='+fields,'--format=csv,noheader,nounits'],capture_output=True,text=True,timeout=3,check=True)
+        executable=find_nvidia_smi()
+        result=subprocess.run([executable,'--query-gpu='+fields,'--format=csv,noheader,nounits'],capture_output=True,text=True,encoding='utf-8',errors='replace',timeout=3,check=True,**child_options())
         import csv
         keys=['index','uuid','name','utilization','memory_utilization','memory_used','memory_total','temperature','power','sm_clock','memory_clock']
         devices=[]
@@ -276,7 +289,7 @@ class Monitor:
                 if k not in ('uuid','name'):
                     d[k]=number(d[k])
             devices.append(d)
-        apps=subprocess.run(['nvidia-smi','--query-compute-apps=gpu_uuid,pid,process_name,used_memory','--format=csv,noheader,nounits'],capture_output=True,text=True,timeout=3)
+        apps=subprocess.run([executable,'--query-compute-apps=gpu_uuid,pid,process_name,used_memory','--format=csv,noheader,nounits'],capture_output=True,text=True,encoding='utf-8',errors='replace',timeout=3,**child_options())
         processes=[]
         if apps.returncode == 0:
             for row in csv.reader(apps.stdout.splitlines(),skipinitialspace=True):
@@ -285,17 +298,23 @@ class Monitor:
         return devices, processes
 
     def system_read(self):
+        if os.name == 'nt':
+            total,idle,mem_total,mem_used=windows_system()
+            return self.system_values(total,idle,mem_total,mem_used)
         info={}
         for line in Path('/proc/meminfo').read_text().splitlines():
             k,v=line.split(':',1); info[k]=int(v.strip().split()[0])
         mem_total=info['MemTotal']/1024
         ticks=list(map(int,Path('/proc/stat').read_text().splitlines()[0].split()[1:]))
         total=sum(ticks[:8]); idle=ticks[3]+ticks[4]
+        return self.system_values(total,idle,mem_total,mem_total-info['MemAvailable']/1024)
+
+    def system_values(self,total,idle,mem_total,mem_used):
         cpu=None
         if self.last_cpu and total>self.last_cpu[0]:
-            cpu=100*(1-(idle-self.last_cpu[1])/(total-self.last_cpu[0]))
+            cpu=max(0,min(100,100*(1-(idle-self.last_cpu[1])/(total-self.last_cpu[0]))))
         self.last_cpu=(total,idle)
-        return dict(cpu=cpu,memory_total=mem_total,memory_used=mem_total-info['MemAvailable']/1024)
+        return dict(cpu=cpu,memory_total=mem_total,memory_used=mem_used)
 
     def sampler(self):
         while not STOP.is_set():
@@ -313,7 +332,7 @@ class Monitor:
                 system=self.system_read()
                 with self.lock:
                     self.state['system']=system
-                self.source('system',True,'Linux /proc · 每秒')
+                self.source('system',True,('Windows API' if os.name == 'nt' else 'Linux /proc')+' · 每秒')
             except (OSError,ValueError,KeyError):
                 self.source('system',False,'系统采样不可用')
             state=self.snapshot()
@@ -392,7 +411,7 @@ class Handler(BaseHTTPRequestHandler):
                 while not STOP.is_set():
                     self.wfile.write(('data: '+json.dumps(self.server.monitor.snapshot())+'\n\n').encode()); self.wfile.flush()
                     STOP.wait(1)
-            except (BrokenPipeError,ConnectionResetError,TimeoutError):
+            except (BrokenPipeError,ConnectionResetError,ConnectionAbortedError,TimeoutError):
                 pass
             self.close_connection=True
         elif path in ('/','/app.js','/style.css'):
@@ -408,9 +427,12 @@ def main():
     parser.add_argument('--host',default='127.0.0.1')
     parser.add_argument('--port',type=int,default=8090)
     parser.add_argument('--lm-url',default=os.environ.get('LM_URL','http://127.0.0.1:1234'))
-    parser.add_argument('--lms',default=os.environ.get('LMS_BIN',str(Path.home()/'.lmstudio/bin/lms')))
+    parser.add_argument('--lms',default=find_lms())
+    parser.add_argument('--lms-port',type=int,help='本机 CLI/SDK 端口（不是 REST API 端口）；默认自动发现')
     parser.add_argument('--db',default=str(ROOT/'data'/'monitor.sqlite3'))
     config=parser.parse_args();config.lm_url=config.lm_url.rstrip('/');config.token=os.environ.get('LM_API_TOKEN','')
+    if config.lms_port is not None and not 0 < config.lms_port < 65536:
+        parser.error('--lms-port 必须在 1 到 65535 之间')
     url=urlsplit(config.lm_url)
     if url.hostname not in ('localhost','127.0.0.1','::1') or url.scheme not in ('http','https'):
         parser.error('仅支持本机 LM Studio URL，CLI 日志始终来自本机')
@@ -421,6 +443,8 @@ def main():
         monitor.stop()
         threading.Thread(target=server.shutdown,daemon=True).start()
     signal.signal(signal.SIGTERM,shutdown);signal.signal(signal.SIGINT,shutdown)
+    if hasattr(signal,'SIGBREAK'):
+        signal.signal(signal.SIGBREAK,shutdown)
     monitor.start()
     print(f'LM Studio Monitor: http://{config.host}:{config.port}',flush=True)
     try:

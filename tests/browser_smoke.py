@@ -1,10 +1,11 @@
 """Optional browser acceptance checks: pip install playwright; playwright install chromium."""
 import argparse
 import json
+import tempfile
 from pathlib import Path
 from playwright.sync_api import sync_playwright, expect
 
-parser=argparse.ArgumentParser();parser.add_argument('--url',default='http://127.0.0.1:8090');parser.add_argument('--screenshots',default='/tmp/lmstudio-v2-screenshots');parser.add_argument('--clear-history',action='store_true');args=parser.parse_args()
+parser=argparse.ArgumentParser();parser.add_argument('--url',default='http://127.0.0.1:8090');parser.add_argument('--screenshots',default=str(Path(tempfile.gettempdir())/'lmstudio-v2-screenshots'));parser.add_argument('--clear-history',action='store_true');args=parser.parse_args()
 out=Path(args.screenshots);out.mkdir(parents=True,exist_ok=True)
 with sync_playwright() as p:
     browser=p.chromium.launch(headless=True)
